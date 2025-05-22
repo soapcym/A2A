@@ -4,7 +4,7 @@ import traceback
 from typing import AsyncIterable, Union, Dict, Any
 import common.server.utils as utils
 
-from agents.llama_index_file_chat.agent import ParseAndChat, InputEvent, LogEvent, ChatResponseEvent
+from agents.llama_index_file_chat.pc_agent import ParseAndChat, InputEvent, LogEvent, ChatResponseEvent
 from common.types import (
     SendTaskRequest,
     TaskSendParams,

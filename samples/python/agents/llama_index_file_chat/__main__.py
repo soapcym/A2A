@@ -1,8 +1,8 @@
 from common.server import A2AServer
 from common.types import AgentCard, AgentCapabilities, AgentSkill, MissingAPIKeyError
 from common.utils.push_notification_auth import PushNotificationSenderAuth
-from agents.llama_index_file_chat.mobile_task_manager import LlamaIndexTaskManager
-from agents.llama_index_file_chat.mobile_agent import MobileInteractionAgent
+from agents.llama_index_file_chat.pc_task_manager import LlamaIndexTaskManager
+from agents.llama_index_file_chat.pc_agent import MobileInteractionAgent
 import click
 import os
 import logging
