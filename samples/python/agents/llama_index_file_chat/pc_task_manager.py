@@ -4,7 +4,7 @@ import traceback
 from typing import AsyncIterable, Union, Dict, Any
 import common.server.utils as utils
 
-from agents.llama_index_file_chat.pc_agent import ParseAndChat, InputEvent, LogEvent, ChatResponseEvent
+from agents.llama_index_file_chat.pc_agent import PCInteractionAgent, TaskEvent, LogEvent, TaskCompleteEvent
 from common.types import (
     SendTaskRequest,
     TaskSendParams,
@@ -44,7 +44,7 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
     ]
     SUPPORTED_OUTPUT_TYPES = ["text","text/plain"]
 
-    def __init__(self, agent: ParseAndChat, notification_sender_auth: PushNotificationSenderAuth):
+    def __init__(self, agent: PCInteractionAgent, notification_sender_auth: PushNotificationSenderAuth):
         super().__init__()
         self.agent = agent
         self.notification_sender_auth = notification_sender_auth
@@ -78,6 +78,8 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
             else:
                 # New session!
                 logger.info(f"Starting new session {session_id}")
+                ctx=Context(self.agent)
+                await ctx.set("metadata", task_send_params.metadata)
                 handler = self.agent.run(
                     start_event=input_event,
                 )
@@ -103,28 +105,26 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
 
             # If we got here without hitting a return, wait for final response
             final_response = await handler
-            if isinstance(final_response, ChatResponseEvent):
+            if isinstance(final_response, TaskCompleteEvent):
                 content = final_response.response
                 parts = [{"type": "text", "text": content}]
-                metadata = final_response.citations if hasattr(final_response, 'citations') else None            
-                if metadata is not None:
-                    # ensure metadata is a dict of str keys
-                    metadata = {str(k): v for k, v in metadata.items()}                    
+                task_history = final_response.history if hasattr(final_response, 'history') else None
+                parts.append({"type": "text", "text": f"History: {task_history}"})
 
                 # save the context state to resume the current session
                 self.ctx_states[session_id] = handler.ctx.to_dict()
-                
-                artifact = Artifact(parts=parts, index=0, append=False, metadata=metadata)
+
+                artifact = Artifact(parts=parts, index=0, append=False)
                 task_status = TaskStatus(state=TaskState.COMPLETED)
                 latest_task = await self.update_store(task_id, task_status, [artifact])
                 await self.send_task_notification(latest_task)
-                
+
                 # Send artifact update
                 task_artifact_update_event = TaskArtifactUpdateEvent(
                     id=task_id, artifact=artifact
                 )
                 await self.enqueue_events_for_sse(task_id, task_artifact_update_event)
-                
+
                 # Send final status update
                 task_update_event = TaskStatusUpdateEvent(
                     id=task_id, status=task_status, final=True
@@ -158,6 +158,10 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
                 self.SUPPORTED_OUTPUT_TYPES,
             )
             return utils.new_incompatible_types_error(request.id)
+
+        if task_send_params.metadata is None or task_send_params.metadata.get("instanceId") is None:
+            logger.warning("Missing instanceId in metadata")
+            return JSONRPCResponse(id=request.id, error=InvalidParamsError(message="Missing instanceId in metadata"))
         
         if task_send_params.pushNotification and not task_send_params.pushNotification.url:
             logger.warning("Push notification URL is missing")
@@ -210,17 +214,16 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
                 )
             
             
-            final_response: ChatResponseEvent = await handler
+            final_response: TaskCompleteEvent = await handler
 
             # Create artifact with response
             content = final_response.response
             parts = [{"type": "text", "text": content}]
-            metadata = final_response.citations if hasattr(final_response, 'citations') else None            
-            if metadata is not None:
-                metadata = {str(k): v for k, v in metadata.items()}                    
+            task_history = final_response.history if hasattr(final_response, 'history') else None
+            parts.append({"type": "text", "text": f"History: {task_history}"})
             
             task_status = TaskStatus(state=TaskState.COMPLETED)
-            artifact = Artifact(parts=parts, index=0, append=False, metadata=metadata)
+            artifact = Artifact(parts=parts, index=0, append=False)
             task = await self.update_store(task_id, task_status, [artifact])
             task_result = self.append_task_history(task, task_send_params.historyLength)
             await self.send_task_notification(task)
@@ -273,27 +276,11 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
                 ),
             )
 
-    def _get_input_event(self, task_send_params: TaskSendParams) -> InputEvent:
-        """Extract file attachment if present in the message parts."""
-        file_data = None
-        file_name = None
-        text_parts = []
-        for part in task_send_params.message.parts:
-            if isinstance(part, FilePart):
-                file_data =part.file.bytes
-                file_name = part.file.name
-                if file_data is None:
-                    raise ValueError("File data is missing!")
-            elif isinstance(part, TextPart):
-                text_parts.append(part.text)
-            else:
-                raise ValueError(f"Unsupported part type: {type(part)}")
-        
-        return InputEvent(
-            msg="\n".join(text_parts),
-            attachment=file_data,
-            file_name=file_name,
-        )
+    def _get_task_event(self, task_send_params: TaskSendParams) -> TaskEvent:
+        part = task_send_params.message.parts[0]
+        if not isinstance(part, TextPart):
+            raise ValueError("Only text parts are supported")
+        return TaskEvent(task=part.text)
     
     async def send_task_notification(self, task: Task):
         if not await self.has_push_notification_info(task.id):

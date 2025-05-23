@@ -8,6 +8,7 @@ from typing import Any, Optional, Dict, List
 from llama_index.core.llms import ChatMessage
 from llama_index.core.workflow import Context, Event, StartEvent, StopEvent, Workflow, step
 from llama_index.core.memory import ChatMemoryBuffer
+from llama_index.core.base.llms.types import ChatMessage, MessageRole, TextBlock, ImageBlock
 from llama_index.core.prompts import PromptTemplate
 from llama_index.llms.openai_like import OpenAILike
 from pydantic import BaseModel, Field, model_validator
@@ -132,22 +133,7 @@ class ActionResultEvent(Event):
 class TaskCompleteEvent(StopEvent):
     response: str
     history: List[Dict]
-class InputEvent(StartEvent):
-    msg: str
-    attachment: Optional[str] = None
-    file_name: Optional[str] = None
 
-class ParseEvent(Event):
-    attachment: str
-    file_name: str
-    msg: str
-
-class ChatEvent(Event):
-    msg: str
-
-class ChatResponseEvent(StopEvent):
-    response: str
-    citations: dict[int, list[str]]
 
 ## Structured Outputs
 
@@ -213,116 +199,124 @@ class PCInteractionAgent(Workflow):
 执行历史：{history}
 """)
 
-        @step
-        async def start(self, ctx: Context, ev: TaskEvent) -> ScreenshotEvent:
-            ctx.write_event_to_stream(LogEvent(msg=f"Starting task: {ev.task}"))
-            await ctx.set("task", ev.task)
-            await ctx.set("history", [])  # 初始化执行历史
-            metadata = await ctx.get("metadata", default={})
-            if not metadata["instanceId"]:
-                logger.error("No instanceId provided in TaskEvent")
-                raise ValueError("No instanceId provided in TaskEvent")
+    @step
+    async def start(self, ctx: Context, ev: TaskEvent) -> ScreenshotEvent:
+        ctx.write_event_to_stream(LogEvent(msg=f"Starting task: {ev.task}"))
+        await ctx.set("task", ev.task)
+        await ctx.set("history", [])  # 初始化执行历史
+        metadata = await ctx.get("metadata", default={})
+        if not metadata["instanceId"]:
+            logger.error("No instanceId provided in TaskEvent")
+            raise ValueError("No instanceId provided in TaskEvent")
 
-            screenshot_url = await get_screenshot(ctx)
-            ctx.write_event_to_stream(LogEvent(msg=f"Retrieved screenshot: {screenshot_url}"))
-            return ScreenshotEvent(screenshot_url=screenshot_url, task=ev.task)
+        screenshot_url = await get_screenshot(ctx)
+        ctx.write_event_to_stream(LogEvent(msg=f"Retrieved screenshot: {screenshot_url}"))
+        return ScreenshotEvent(screenshot_url=screenshot_url, task=ev.task)
 
-        @step
-        async def analyze_screenshot(self, ctx: Context, ev: ScreenshotEvent) -> ActionEvent | TaskCompleteEvent:
-            task = await ctx.get("task")
+    @step
+    async def analyze_screenshot(self, ctx: Context, ev: ScreenshotEvent) -> ActionEvent | TaskCompleteEvent:
+        task = await ctx.get("task")
+        history = await ctx.get("history", default=[])
+        history_summary = "\n".join(
+            [f"Step {i + 1}: {h['action']} with {h['params']} -> {h['result']['message']}" for i, h in
+             enumerate(history)])
+
+        # 构造 LLM 输入
+        prompt = self.system_prompt.format(
+            task=task,
+            history=history_summary or "No actions taken yet",
+        )
+
+        temp_dir = os.path.join(os.getcwd(), "tmp", "screenshots")
+        # 如果文件夹不存在就创建
+        if not os.path.exists(temp_dir):
+            os.makedirs(temp_dir)
+        temp_image_path = os.path.join(temp_dir, f"{hash(ev.screenshot_url)}.png")
+
+        img_response = requests.get(ev.screenshot_url, verify=False)
+
+        with open(temp_image_path, 'wb') as f:
+            f.write(img_response.content)
+        # 异步下载图片
+        # async with aiohttp.ClientSession() as session:
+        #     async with session.get(ev.screenshot_url) as response:
+        #         img_content = await response.read()
+        #         with open(temp_image_path, 'wb') as f:
+        #             f.write(img_content)
+
+        messages = [
+            ChatMessage(role="system", content=prompt),
+            ChatMessage(role="user", blocks=[
+                ImageBlock(path=temp_image_path),
+                TextBlock(text=f"分析PC截图，并且决定下一步动作来完成任务：{task}")
+            ])
+        ]
+
+        # 获取对话历史
+        chat_history = await self.memory.aget_all()
+        messages = chat_history + messages
+        ctx.write_event_to_stream(LogEvent(msg="Analyzing screenshot and task..."))
+
+        # 调用 LLM
+        response = await self.llm.achat(messages)
+        decision: PCActionDecision = response.raw
+        ctx.write_event_to_stream(
+            LogEvent(
+                msg=f"Decision: {decision.action} with params {decision.params}, Reasoning: {decision.reasoning}"))
+
+        # 函数结束后可以选择删除临时文件
+        os.remove(temp_image_path)
+        # 更新对话历史
+        self.memory.put(response.message)
+
+        if decision.is_complete:
+            return TaskCompleteEvent(response=f"Task completed: {decision.reasoning}", history=history)
+
+        return ActionEvent(action=decision.action, params=decision.get_parsed_params(), task=task)
+
+    @step
+    async def execute_action_step(self, ctx: Context, ev: ActionEvent) -> ActionResultEvent:
+        ctx.write_event_to_stream(LogEvent(msg=f"Executing action: {ev.action} with params {ev.params}"))
+        result = await execute_action(ctx, ev.action, ev.params)
+        ctx.write_event_to_stream(LogEvent(msg=f"Action result: {result['message']}"))
+
+        # 更新执行历史
+        history = await ctx.get("history", default=[])
+        history.append({"action": ev.action, "params": ev.params, "result": result})
+        await ctx.set("history", history)
+
+        return ActionResultEvent(result=result, task=ev.task)
+
+    @step
+    async def check_completion(self, ctx: Context, ev: ActionResultEvent) -> ScreenshotEvent | TaskCompleteEvent:
+        if not ev.result["success"]:
             history = await ctx.get("history", default=[])
-            history_summary = "\n".join(
-                [f"Step {i + 1}: {h['action']} with {h['params']} -> {h['result']['message']}" for i, h in
-                 enumerate(history)])
+            return TaskCompleteEvent(response=f"Task failed: {ev.result['message']}", history=history)
 
-            # 构造 LLM 输入
-            prompt = self.system_prompt.format(
-                task=task,
-                history=history_summary or "No actions taken yet",
-            )
+        # 获取新的截图，继续任务
+        screenshot_url = await get_screenshot(ctx)
+        ctx.write_event_to_stream(LogEvent(msg=f"Retrieved new screenshot: {screenshot_url}"))
+        return ScreenshotEvent(screenshot_url=screenshot_url, task=ev.task)
 
-            temp_dir = os.path.join(os.getcwd(), "tmp", "screenshots")
-            # 如果文件夹不存在就创建
-            if not os.path.exists(temp_dir):
-                os.makedirs(temp_dir)
-            temp_image_path = os.path.join(temp_dir, f"{hash(ev.screenshot_url)}.png")
-
-            img_response = requests.get(ev.screenshot_url, verify=False)
-
-            with open(temp_image_path, 'wb') as f:
-                f.write(img_response.content)
-            # 异步下载图片
-            # async with aiohttp.ClientSession() as session:
-            #     async with session.get(ev.screenshot_url) as response:
-            #         img_content = await response.read()
-            #         with open(temp_image_path, 'wb') as f:
-            #             f.write(img_content)
-
-            messages = [
-                ChatMessage(role="system", content=prompt),
-                ChatMessage(role="user", blocks=[
-                    ImageBlock(path=temp_image_path),
-                    TextBlock(text=f"分析PC截图，并且决定下一步动作来完成任务：{task}")
-                ])
-            ]
-
-            # 获取对话历史
-            chat_history = await self.memory.aget_all()
-            messages = chat_history + messages
-            ctx.write_event_to_stream(LogEvent(msg="Analyzing screenshot and task..."))
-
-            # 调用 LLM
-            response = await self.llm.achat(messages)
-            decision: PCActionDecision = response.raw
-            ctx.write_event_to_stream(
-                LogEvent(
-                    msg=f"Decision: {decision.action} with params {decision.params}, Reasoning: {decision.reasoning}"))
-
-            # 函数结束后可以选择删除临时文件
-            os.remove(temp_image_path)
-            # 更新对话历史
-            self.memory.put(response.message)
-
-            if decision.is_complete:
-                return TaskCompleteEvent(response=f"Task completed: {decision.reasoning}", history=history)
-
-            return ActionEvent(action=decision.action, params=decision.get_parsed_params(), task=task)
 async def main():
     """Test script for the ParseAndChat agent."""
     agent = PCInteractionAgent()
     ctx = Context(agent)
+    await ctx.set("metadata", {"instanceId": "acp-1hs2j2n7fjpzyn79a"})
 
-    # run `wget https://arxiv.org/pdf/1706.03762 -O attention.pdf` to get the file
-    # Or use your own file
-    with open("attention.pdf", "rb") as f:
-        attachment = f.read()
-        
-    handler = agent.run(
-        start_event=InputEvent(
-            msg="Hello! What can you tell me about the document?", 
-            attachment=attachment, 
-            file_name="test.pdf",
-        ),
-        ctx=ctx,
-    )
-    
-    async for event in handler:
-        if not isinstance(event, StopEvent):
-            print(event)
-    
-    response: ChatResponseEvent = await handler
+    # 测试任务
+    task = "给零封发消息，说你好"
+    handler = agent.run(start_event=TaskEvent(task=task), ctx=ctx)
 
-    print(response.response)
-    for citation_number, citation_texts in response.citations.items():
-        print(f"Citation {citation_number}: {citation_texts}")
-    
-    # test context persistence
-    handler = agent.run(
-        "What was the last thing I asked you?",
-        ctx=ctx,
-    )
-    response: ChatResponseEvent = await handler
-    print(response.response)
+    async for event in handler.stream_events():
+        if isinstance(event, LogEvent):
+            print(f"Log: {event.msg}")
+
+    result: TaskCompleteEvent = await handler
+    print(f"Final Response: {result.response}")
+    print("Execution History:")
+    for i, step in enumerate(result.history):
+        print(f"Step {i + 1}: {step['action']} with {step['params']} -> {step['result']['message']}")
 
 if __name__ == "__main__":
     import asyncio

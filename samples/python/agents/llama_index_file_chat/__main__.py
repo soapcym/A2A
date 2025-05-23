@@ -2,7 +2,7 @@ from common.server import A2AServer
 from common.types import AgentCard, AgentCapabilities, AgentSkill, MissingAPIKeyError
 from common.utils.push_notification_auth import PushNotificationSenderAuth
 from agents.llama_index_file_chat.pc_task_manager import LlamaIndexTaskManager
-from agents.llama_index_file_chat.pc_agent import MobileInteractionAgent
+from agents.llama_index_file_chat.pc_agent import PCInteractionAgent
 import click
 import os
 import logging
@@ -50,7 +50,7 @@ def main(host, port):
         server = A2AServer(
             agent_card=agent_card,
             task_manager=LlamaIndexTaskManager(
-                agent=MobileInteractionAgent(),
+                agent=PCInteractionAgent(),
                 notification_sender_auth=notification_sender_auth
             ),
             host=host,
