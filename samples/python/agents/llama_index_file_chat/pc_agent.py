@@ -15,10 +15,13 @@ from pydantic import BaseModel, Field, model_validator
 from enum import Enum
 import requests
 from my_utils.logger_util import logger
+from common.ws import send_websocket_command
 
 async def get_screenshot(ctx: Context) -> str:
     metadata = await ctx.get("metadata", default={})
     instance_id = metadata["instanceId"]
+    logger.info(f"get_screenshot instance_id: {instance_id}")
+    await send_websocket_command(ctx, {"action": "screenshot"})
   #  appium_action = instance_manager.get_or_create_client(instance_id)
  #   return appium_action.execute("screenshot")["screenshot"]
 
