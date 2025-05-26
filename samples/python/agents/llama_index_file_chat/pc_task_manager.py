@@ -159,9 +159,9 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
             )
             return utils.new_incompatible_types_error(request.id)
 
-        if task_send_params.metadata is None or task_send_params.metadata.get("instanceId") is None:
-            logger.warning("Missing instanceId in metadata")
-            return JSONRPCResponse(id=request.id, error=InvalidParamsError(message="Missing instanceId in metadata"))
+    #    if task_send_params.metadata is None or task_send_params.metadata.get("instanceId") is None:
+    #        logger.warning("Missing instanceId in metadata")
+    #        return JSONRPCResponse(id=request.id, error=InvalidParamsError(message="Missing instanceId in metadata"))
         
         if task_send_params.pushNotification and not task_send_params.pushNotification.url:
             logger.warning("Push notification URL is missing")
@@ -191,7 +191,7 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
         await self.send_task_notification(task)
 
         task_send_params: TaskSendParams = request.params
-        input_event = self._get_input_event(task_send_params)
+        input_event = self._get_task_event(task_send_params)
         
         try:
             # Check if we have a saved context for this session
@@ -209,8 +209,11 @@ class LlamaIndexTaskManager(InMemoryTaskManager):
             else:
                 # New conversation
                 logger.info(f"Starting new conversation for session {session_id}")
+                ctx = Context(self.agent)
+                await ctx.set("metadata", task_send_params.metadata)
                 handler = self.agent.run(
                     start_event=input_event,
+                    ctx=ctx,
                 )
             
             

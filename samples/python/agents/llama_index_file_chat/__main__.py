@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 @click.command()
 @click.option("--host", "host", default="0.0.0.0")
-@click.option("--port", "port", default=10000)
+@click.option("--port", "port", default=10010)
 def main(host, port):
     """Starts the Currency Agent server."""
     try:
@@ -27,16 +27,16 @@ def main(host, port):
         capabilities = AgentCapabilities(streaming=True, pushNotifications=True)
         
         skill = AgentSkill(
-            id="mobile_agent",
-            name="Mobile Agent",
+            id="pc_agent",
+            name="PC Agent",
             description="可以在手机上完成拟人化的功能，包括聊天、创建日程、查询天气等",
-            tags=["手机", "聊天", "日程", "天气"],
+            tags=["pc", "聊天", "日程", "天气"],
             examples=["给零封发消息", "明天的日程是什么", "今天的天气怎么样"]
         )
 
         agent_card = AgentCard(
-            name="Mobile Agent",
-            description="可以在手机上完成拟人化的功能，包括聊天、创建日程、查询天气等",
+            name="PC Agent",
+            description="可以在pc上完成拟人化的功能，包括聊天、创建日程、查询天气等",
             url=f"http://{host}:{port}/",
             version="1.0.0",
             defaultInputModes=LlamaIndexTaskManager.SUPPORTED_INPUT_TYPES,
