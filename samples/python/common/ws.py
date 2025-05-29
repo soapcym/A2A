@@ -260,13 +260,15 @@ async def send_websocket_command(ctx: Context, command: dict) -> dict:
         # 发送命令
         success = await websocket_manager.send_message(connection_id, command)
         if not success:
+            logger.error(f"发送命令失败，连接ID: {connection_id}")
             return {"error": "发送命令失败"}
 
         # 接收响应
+        logger.info(f"receive_message begin")
         response = await websocket_manager.receive_message(connection_id, timeout=10.0)
         if response is None:
             return {"error": "接收响应超时"}
-
+        logger.info(f"receive_message response: {response}")
         return response
 
     except Exception as e:

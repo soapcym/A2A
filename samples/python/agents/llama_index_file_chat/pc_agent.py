@@ -21,16 +21,66 @@ async def get_screenshot(ctx: Context) -> str:
     metadata = await ctx.get("metadata", default={})
     instance_id = metadata["instanceId"]
     logger.info(f"get_screenshot instance_id: {instance_id}")
-    await send_websocket_command(ctx, {"action": "screenshot"})
-  #  appium_action = instance_manager.get_or_create_client(instance_id)
- #   return appium_action.execute("screenshot")["screenshot"]
-
+    
+    response = await send_websocket_command(ctx, {
+        "action": "screenshot",
+        "data": {},
+        "command": "execAction",
+        "deviceid": "ecd-fd5olqih3o5ttx6y2"
+    })
+    
+    logger.info(f"get_screenshot receive_message response: {response}")
+    
+    # 检查响应是否包含错误
+    if "error" in response:
+        logger.error(f"获取截图失败: {response['error']}")
+        raise RuntimeError(f"获取截图失败: {response['error']}")
+    
+    # 解析嵌套的JSON结构
+    try:
+        # 第一步：获取message字段（JSON字符串）
+        message_str = response.get('message')
+        if not message_str:
+            raise ValueError("响应中没有message字段")
+        
+        # 第二步：解析message中的JSON字符串
+        message_data = json.loads(message_str)
+        logger.info(f"解析后的message数据: {message_data}")
+        
+        # 第三步：检查action是否成功
+        if message_data.get('action') != 'execSuccess':
+            raise ValueError(f"执行截图命令失败，action: {message_data.get('action')}")
+        
+        # 第四步：提取URL
+        data = message_data.get('data', {})
+        screenshot_url = data.get('url')
+        
+        if not screenshot_url:
+            raise ValueError("响应数据中未找到截图URL")
+        
+        logger.info(f"成功获取截图URL: {screenshot_url}")
+        return screenshot_url
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"解析JSON失败: {e}")
+        raise RuntimeError(f"解析响应数据失败: {e}")
+    except Exception as e:
+        logger.error(f"提取截图URL失败: {e}")
+        raise RuntimeError(f"提取截图URL失败: {e}")
 
 # execute_action 工具函数
 async def execute_action(ctx: Context, action: str, params: dict) -> Dict:
     metadata = await ctx.get("metadata", default={})
     instance_id = metadata["instanceId"]
     logger.info(f"instance_id: {instance_id}")
+    logger.info(f"execute action: {action}, params: {params}")
+    result = await send_websocket_command(ctx, {
+        "action": action,
+        "data": params,
+        "command": "execAction",
+        "deviceid": "ecd-fd5olqih3o5ttx6y2"
+    })
+    return result
 #    appium_action = instance_manager.get_or_create_client(instance_id)
 #    result = appium_action.execute(action, params)
 #    return result
@@ -236,7 +286,7 @@ class PCInteractionAgent(Workflow):
             os.makedirs(temp_dir)
         temp_image_path = os.path.join(temp_dir, f"{hash(ev.screenshot_url)}.png")
 
-        img_response = requests.get(ev.screenshot_url, verify=False)
+        img_response = requests.get(ev.screenshot_url, verify=True)
 
         with open(temp_image_path, 'wb') as f:
             f.write(img_response.content)
@@ -261,7 +311,9 @@ class PCInteractionAgent(Workflow):
         ctx.write_event_to_stream(LogEvent(msg="Analyzing screenshot and task..."))
 
         # 调用 LLM
+        logger.info("Calling LLM with messages: %s", messages)
         response = await self.llm.achat(messages)
+        logger.info("LLM response: %s", response)
         decision: PCActionDecision = response.raw
         ctx.write_event_to_stream(
             LogEvent(
@@ -280,6 +332,7 @@ class PCInteractionAgent(Workflow):
     @step
     async def execute_action_step(self, ctx: Context, ev: ActionEvent) -> ActionResultEvent:
         ctx.write_event_to_stream(LogEvent(msg=f"Executing action: {ev.action} with params {ev.params}"))
+        logger.info("Executing action: %s with params %s", ev.action, ev.params)
         result = await execute_action(ctx, ev.action, ev.params)
         ctx.write_event_to_stream(LogEvent(msg=f"Action result: {result['message']}"))
 
@@ -324,4 +377,3 @@ async def main():
 if __name__ == "__main__":
     import asyncio
     asyncio.run(main())
-
